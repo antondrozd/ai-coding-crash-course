@@ -119,6 +119,8 @@ export default function InstructorAnalytics({
                   <TableHead className="text-right">
                     Revenue, last 30 days
                   </TableHead>
+                  <TableHead className="text-right">Completion</TableHead>
+                  <TableHead className="text-right">Avg. progress</TableHead>
                   <TableHead className="pr-4 text-right">
                     Avg. best quiz score
                   </TableHead>
@@ -147,6 +149,12 @@ export default function InstructorAnalytics({
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {formatRevenue(row.revenueLast30Days)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatPercent(row.completionRate)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatPercent(row.averageProgress)}
                     </TableCell>
                     <TableCell className="pr-4 text-right tabular-nums">
                       {formatPercent(row.averageBestQuizScore)}

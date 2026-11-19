@@ -17,6 +17,8 @@ import {
   CourseStatus,
   courses,
   enrollments,
+  LessonProgressStatus,
+  lessonProgress,
   lessons,
   modules,
   purchases,
@@ -46,6 +48,10 @@ export interface AnalyticsCourseRow {
   revenueLast30Days: number;
   /** Mean of every (student, quiz) best score in the course, 0–1; `null` when nobody attempted a quiz. */
   averageBestQuizScore: number | null;
+  /** Share of enrolled students who completed every lesson; `null` with no lessons or no enrollments. */
+  completionRate: number | null;
+  /** Mean over enrolled students of completed/total lessons; `null` with no lessons or no enrollments. */
+  averageProgress: number | null;
 }
 
 export interface AnalyticsTotals {
@@ -164,6 +170,7 @@ function buildRows(scoped: ScopedCourse[], now: Date): AnalyticsCourseRow[] {
   const students = studentStats(courseIds, cutoff);
   const revenue = revenueStats(courseIds, cutoff);
   const quizScores = quizScoreStats(courseIds);
+  const progress = progressStats(courseIds);
 
   return scoped.map((c) => ({
     courseId: c.id,
@@ -174,6 +181,7 @@ function buildRows(scoped: ScopedCourse[], now: Date): AnalyticsCourseRow[] {
     revenue: revenue.get(c.id)?.revenue ?? 0,
     revenueLast30Days: revenue.get(c.id)?.revenueLast30Days ?? 0,
     averageBestQuizScore: quizScores.get(c.id) ?? null,
+    ...progressRates(progress.get(c.id), students.get(c.id)?.students ?? 0),
   }));
 }
 
@@ -323,4 +331,101 @@ function quizBreakdown(courseId: number, enrolled: number): QuizBreakdown[] {
         q.averageBestScore === null ? null : Number(q.averageBestScore),
       passRate: q.passRate === null ? null : Number(q.passRate),
     }));
+}
+
+// ─── Completion rate and average progress ───
+// Completion counts lessons only (quizzes don't count) and ignores the unused
+// `enrollments.completedAt`. Lessons added later lower the rates — accepted.
+
+type ProgressStats = {
+  /** Lessons in the course. */
+  lessons: number;
+  /** Sum over enrolled students of distinct completed lessons. */
+  completedLessons: number;
+  /** Enrolled students who completed every lesson. */
+  completedStudents: number;
+};
+
+function progressRates(
+  stats: ProgressStats | undefined,
+  students: number
+): Pick<AnalyticsCourseRow, "completionRate" | "averageProgress"> {
+  if (!stats || stats.lessons === 0 || students === 0) {
+    return { completionRate: null, averageProgress: null };
+  }
+  return {
+    completionRate: stats.completedStudents / students,
+    averageProgress: stats.completedLessons / (stats.lessons * students),
+  };
+}
+
+function progressStats(courseIds: number[]): Map<number, ProgressStats> {
+  const lessonTotals = db
+    .select({
+      courseId: modules.courseId,
+      lessons: count(lessons.id).as("lessons"),
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .where(inArray(modules.courseId, courseIds))
+    .groupBy(modules.courseId)
+    .as("lesson_totals");
+
+  // Distinct completed lessons per enrolled (course, student). Joining
+  // enrollments drops progress from non-enrolled users; countDistinct absorbs
+  // duplicate enrollments and duplicate progress rows.
+  const perStudent = db
+    .select({
+      courseId: modules.courseId,
+      done: countDistinct(lessonProgress.lessonId).as("done"),
+    })
+    .from(lessonProgress)
+    .innerJoin(lessons, eq(lessons.id, lessonProgress.lessonId))
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .innerJoin(
+      enrollments,
+      and(
+        eq(enrollments.userId, lessonProgress.userId),
+        eq(enrollments.courseId, modules.courseId)
+      )
+    )
+    .where(
+      and(
+        inArray(modules.courseId, courseIds),
+        eq(lessonProgress.status, LessonProgressStatus.Completed)
+      )
+    )
+    .groupBy(modules.courseId, lessonProgress.userId)
+    .as("per_student");
+
+  const done = new Map(
+    db
+      .select({
+        courseId: perStudent.courseId,
+        completedLessons: sum(perStudent.done).mapWith(Number),
+        completedStudents: sum(
+          sql`case when ${perStudent.done} >= ${lessonTotals.lessons} then 1 else 0 end`
+        ).mapWith(Number),
+      })
+      .from(perStudent)
+      .innerJoin(lessonTotals, eq(lessonTotals.courseId, perStudent.courseId))
+      .groupBy(perStudent.courseId)
+      .all()
+      .map((r) => [r.courseId, r])
+  );
+
+  return new Map(
+    db
+      .select({ courseId: lessonTotals.courseId, lessons: lessonTotals.lessons })
+      .from(lessonTotals)
+      .all()
+      .map((r) => [
+        r.courseId,
+        {
+          lessons: r.lessons,
+          completedLessons: done.get(r.courseId)?.completedLessons ?? 0,
+          completedStudents: done.get(r.courseId)?.completedStudents ?? 0,
+        },
+      ])
+  );
 }
