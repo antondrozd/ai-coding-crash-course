@@ -199,6 +199,22 @@ describe("getAnalyticsOverview", () => {
     });
   });
 
+  it("counts a student in the last 30 days only when their first enrollment in the course falls in the window", () => {
+    const returning = createStudent();
+    const fresh = createStudent();
+    // Enrolled long ago, then a duplicate enrollment recently: not a new student.
+    enroll(returning.id, base.course.id, ago(100 * DAY));
+    enroll(returning.id, base.course.id, ago(2 * DAY));
+    enroll(fresh.id, base.course.id, ago(2 * DAY));
+
+    const { rows } = getAnalyticsOverview({
+      instructorId: base.instructor.id,
+      now: NOW,
+    });
+
+    expect(rows[0]).toMatchObject({ students: 2, studentsLast30Days: 1 });
+  });
+
   it("sorts rows by students, highest first, and totals the figures across rows", () => {
     const bigCourse = createCourse(base.instructor.id, "Big Course");
     const [a, b, c] = [createStudent(), createStudent(), createStudent()];
@@ -433,7 +449,7 @@ describe("quiz breakdown", () => {
   }
 
   /** Moves a quiz's module to `position` and renames its lesson. */
-  function place(
+  function moveQuizToModulePosition(
     quiz: { lessonId: number },
     position: number,
     lessonTitle: string
@@ -454,8 +470,8 @@ describe("quiz breakdown", () => {
   it("lists the course's quizzes in course order with 0 attempted and null figures when nobody attempted", () => {
     const second = createQuiz(base.course.id);
     const first = createQuiz(base.course.id);
-    place(second, 2, "Advanced");
-    place(first, 1, "Intro");
+    moveQuizToModulePosition(second, 2, "Advanced");
+    moveQuizToModulePosition(first, 1, "Intro");
     createQuiz(createCourse(base.instructor.id, "Elsewhere").id);
     enroll(base.user.id, base.course.id);
     enroll(createStudent().id, base.course.id);
@@ -600,7 +616,11 @@ describe("completion rate and average progress", () => {
     for (const l of lessons) setProgress(finisher.id, l.id);
     // Missing the last lesson: in progress, not completed.
     for (const l of lessons.slice(0, 3)) setProgress(almost.id, l.id);
-    setProgress(almost.id, lessons[3].id, schema.LessonProgressStatus.InProgress);
+    setProgress(
+      almost.id,
+      lessons[3].id,
+      schema.LessonProgressStatus.InProgress
+    );
     // Duplicate progress row for the same lesson counts once.
     setProgress(almost.id, lessons[0].id);
 
@@ -655,7 +675,10 @@ describe("completion rate and average progress", () => {
 
     expect(rows).toHaveLength(2);
     for (const row of rows) {
-      expect(row).toMatchObject({ completionRate: null, averageProgress: null });
+      expect(row).toMatchObject({
+        completionRate: null,
+        averageProgress: null,
+      });
     }
   });
 

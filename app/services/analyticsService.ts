@@ -7,6 +7,7 @@ import {
   avg,
   inArray,
   max,
+  min,
   ne,
   sql,
   sum,
@@ -34,18 +35,38 @@ import {
 
 const RECENT_WINDOW_MS = 30 * 86_400_000;
 
-export interface AnalyticsCourseRow {
-  courseId: number;
-  title: string;
-  instructorName: string;
+/** Enrollment and revenue volume, for one course or summed across courses. */
+export interface CourseVolume {
   /** Distinct enrolled users. */
   students: number;
-  /** Distinct users enrolled within the last 30 days. */
+  /** Distinct users whose first enrollment in the course is within the last 30 days. */
   studentsLast30Days: number;
   /** Gross revenue in cents (sum of amount actually paid). */
   revenue: number;
   /** Gross revenue in cents from purchases within the last 30 days. */
   revenueLast30Days: number;
+}
+
+const EMPTY_VOLUME: CourseVolume = {
+  students: 0,
+  studentsLast30Days: 0,
+  revenue: 0,
+  revenueLast30Days: 0,
+};
+
+function addVolume(a: CourseVolume, b: CourseVolume): CourseVolume {
+  return {
+    students: a.students + b.students,
+    studentsLast30Days: a.studentsLast30Days + b.studentsLast30Days,
+    revenue: a.revenue + b.revenue,
+    revenueLast30Days: a.revenueLast30Days + b.revenueLast30Days,
+  };
+}
+
+export interface AnalyticsCourseRow extends CourseVolume {
+  courseId: number;
+  title: string;
+  instructorName: string;
   /** Mean of every (student, quiz) best score in the course, 0–1; `null` when nobody attempted a quiz. */
   averageBestQuizScore: number | null;
   /** Share of enrolled students who completed every lesson; `null` with no lessons or no enrollments. */
@@ -54,12 +75,7 @@ export interface AnalyticsCourseRow {
   averageProgress: number | null;
 }
 
-export interface AnalyticsTotals {
-  students: number;
-  studentsLast30Days: number;
-  revenue: number;
-  revenueLast30Days: number;
-}
+export type AnalyticsTotals = CourseVolume;
 
 export interface AnalyticsOverview {
   /** Published and archived courses in scope, sorted by students (desc). */
@@ -100,26 +116,18 @@ export function getAnalyticsOverview({
   instructorId: number | null;
   now?: Date;
 }): AnalyticsOverview {
-  const scoped = selectCourses(
+  const inScope = selectCourses(
     and(
       ne(courses.status, CourseStatus.Draft),
       instructorId === null ? undefined : eq(courses.instructorId, instructorId)
     )
   );
 
-  const rows = buildRows(scoped, now).sort(
+  const rows = buildRows(inScope, now).sort(
     (a, b) => b.students - a.students || a.title.localeCompare(b.title)
   );
 
-  const totals = rows.reduce<AnalyticsTotals>(
-    (acc, r) => ({
-      students: acc.students + r.students,
-      studentsLast30Days: acc.studentsLast30Days + r.studentsLast30Days,
-      revenue: acc.revenue + r.revenue,
-      revenueLast30Days: acc.revenueLast30Days + r.revenueLast30Days,
-    }),
-    { students: 0, studentsLast30Days: 0, revenue: 0, revenueLast30Days: 0 }
-  );
+  const totals = rows.reduce<AnalyticsTotals>(addVolume, EMPTY_VOLUME);
 
   return { rows, totals };
 }
@@ -133,13 +141,13 @@ export function getCourseAnalytics(
   courseId: number,
   { now = new Date() }: { now?: Date } = {}
 ): CourseAnalytics | null {
-  const scoped = selectCourses(eq(courses.id, courseId));
-  if (scoped.length === 0) return null;
+  const inScope = selectCourses(eq(courses.id, courseId));
+  if (inScope.length === 0) return null;
 
-  const [row] = buildRows(scoped, now);
+  const [row] = buildRows(inScope, now);
   return {
     ...row,
-    purchases: purchaseCounts([courseId]).get(courseId) ?? 0,
+    purchases: purchaseCount(courseId),
     quizzes: quizBreakdown(courseId, row.students),
   };
 }
@@ -149,9 +157,9 @@ export function getCourseAnalytics(
 // as a Map keyed by course id. `buildRows` merges them into rows; add a new
 // metric as another helper plus one merge line there.
 
-type ScopedCourse = { id: number; title: string; instructorName: string };
+type CourseInScope = { id: number; title: string; instructorName: string };
 
-function selectCourses(where: SQL | undefined): ScopedCourse[] {
+function selectCourses(where: SQL | undefined): CourseInScope[] {
   return db
     .select({
       id: courses.id,
@@ -164,47 +172,70 @@ function selectCourses(where: SQL | undefined): ScopedCourse[] {
     .all();
 }
 
-function buildRows(scoped: ScopedCourse[], now: Date): AnalyticsCourseRow[] {
-  const courseIds = scoped.map((c) => c.id);
+function buildRows(inScope: CourseInScope[], now: Date): AnalyticsCourseRow[] {
+  const courseIds = inScope.map((c) => c.id);
   const cutoff = recentCutoff(now);
   const students = studentStats(courseIds, cutoff);
   const revenue = revenueStats(courseIds, cutoff);
   const quizScores = quizScoreStats(courseIds);
   const progress = progressStats(courseIds);
 
-  return scoped.map((c) => ({
-    courseId: c.id,
-    title: c.title,
-    instructorName: c.instructorName,
-    students: students.get(c.id)?.students ?? 0,
-    studentsLast30Days: students.get(c.id)?.studentsLast30Days ?? 0,
-    revenue: revenue.get(c.id)?.revenue ?? 0,
-    revenueLast30Days: revenue.get(c.id)?.revenueLast30Days ?? 0,
-    averageBestQuizScore: quizScores.get(c.id) ?? null,
-    ...progressRates(progress.get(c.id), students.get(c.id)?.students ?? 0),
-  }));
+  return inScope.map((c) => {
+    const volume: CourseVolume = {
+      ...EMPTY_VOLUME,
+      ...students.get(c.id),
+      ...revenue.get(c.id),
+    };
+    return {
+      courseId: c.id,
+      title: c.title,
+      instructorName: c.instructorName,
+      ...volume,
+      averageBestQuizScore: quizScores.get(c.id) ?? null,
+      ...progressRates(progress.get(c.id), volume.students),
+    };
+  });
 }
 
-/** Start of the rolling 30-day window. Timestamps are ISO strings, which sort lexicographically. */
+/**
+ * Start of the rolling 30-day window, as an ISO string. Window checks compare
+ * it as text against `enrolledAt` / `createdAt`, which relies on those columns
+ * holding ISO-8601 UTC timestamps (they sort lexicographically).
+ */
 function recentCutoff(now: Date): string {
   return new Date(now.getTime() - RECENT_WINDOW_MS).toISOString();
 }
 
+/**
+ * Distinct students per course. A student counts as recent only when their
+ * first enrollment in the course is inside the window, so a duplicate recent
+ * enrollment doesn't make a long-standing student look new.
+ */
 function studentStats(courseIds: number[], cutoff: string) {
+  const firstEnrollments = db
+    .select({
+      courseId: enrollments.courseId,
+      userId: enrollments.userId,
+      firstEnrolledAt: min(enrollments.enrolledAt).as("first_enrolled_at"),
+    })
+    .from(enrollments)
+    .where(inArray(enrollments.courseId, courseIds))
+    .groupBy(enrollments.courseId, enrollments.userId)
+    .as("first_enrollments");
+
   return new Map(
     db
       .select({
-        courseId: enrollments.courseId,
-        students: countDistinct(enrollments.userId),
-        studentsLast30Days: countDistinct(
-          sql`case when ${enrollments.enrolledAt} >= ${cutoff} then ${enrollments.userId} end`
-        ),
+        courseId: firstEnrollments.courseId,
+        students: count(),
+        studentsLast30Days: sum(
+          sql`case when ${firstEnrollments.firstEnrolledAt} >= ${cutoff} then 1 else 0 end`
+        ).mapWith(Number),
       })
-      .from(enrollments)
-      .where(inArray(enrollments.courseId, courseIds))
-      .groupBy(enrollments.courseId)
+      .from(firstEnrollments)
+      .groupBy(firstEnrollments.courseId)
       .all()
-      .map((r) => [r.courseId, r])
+      .map(({ courseId, ...counts }) => [courseId, counts])
   );
 }
 
@@ -222,19 +253,17 @@ function revenueStats(courseIds: number[], cutoff: string) {
       .where(inArray(purchases.courseId, courseIds))
       .groupBy(purchases.courseId)
       .all()
-      .map((r) => [r.courseId, r])
+      .map(({ courseId, ...amounts }) => [courseId, amounts])
   );
 }
 
-function purchaseCounts(courseIds: number[]) {
-  return new Map(
+function purchaseCount(courseId: number): number {
+  return (
     db
-      .select({ courseId: purchases.courseId, purchases: count() })
+      .select({ purchases: count() })
       .from(purchases)
-      .where(inArray(purchases.courseId, courseIds))
-      .groupBy(purchases.courseId)
-      .all()
-      .map((r) => [r.courseId, r.purchases])
+      .where(eq(purchases.courseId, courseId))
+      .get()?.purchases ?? 0
   );
 }
 
@@ -377,7 +406,9 @@ function progressStats(courseIds: number[]): Map<number, ProgressStats> {
   const perStudent = db
     .select({
       courseId: modules.courseId,
-      done: countDistinct(lessonProgress.lessonId).as("done"),
+      completedLessons: countDistinct(lessonProgress.lessonId).as(
+        "completed_lessons"
+      ),
     })
     .from(lessonProgress)
     .innerJoin(lessons, eq(lessons.id, lessonProgress.lessonId))
@@ -398,13 +429,13 @@ function progressStats(courseIds: number[]): Map<number, ProgressStats> {
     .groupBy(modules.courseId, lessonProgress.userId)
     .as("per_student");
 
-  const done = new Map(
+  const completionByCourse = new Map(
     db
       .select({
         courseId: perStudent.courseId,
-        completedLessons: sum(perStudent.done).mapWith(Number),
+        completedLessons: sum(perStudent.completedLessons).mapWith(Number),
         completedStudents: sum(
-          sql`case when ${perStudent.done} >= ${lessonTotals.lessons} then 1 else 0 end`
+          sql`case when ${perStudent.completedLessons} >= ${lessonTotals.lessons} then 1 else 0 end`
         ).mapWith(Number),
       })
       .from(perStudent)
@@ -416,15 +447,20 @@ function progressStats(courseIds: number[]): Map<number, ProgressStats> {
 
   return new Map(
     db
-      .select({ courseId: lessonTotals.courseId, lessons: lessonTotals.lessons })
+      .select({
+        courseId: lessonTotals.courseId,
+        lessons: lessonTotals.lessons,
+      })
       .from(lessonTotals)
       .all()
       .map((r) => [
         r.courseId,
         {
           lessons: r.lessons,
-          completedLessons: done.get(r.courseId)?.completedLessons ?? 0,
-          completedStudents: done.get(r.courseId)?.completedStudents ?? 0,
+          completedLessons:
+            completionByCourse.get(r.courseId)?.completedLessons ?? 0,
+          completedStudents:
+            completionByCourse.get(r.courseId)?.completedStudents ?? 0,
         },
       ])
   );

@@ -1,15 +1,9 @@
-import { Link, isRouteErrorResponse } from "react-router";
+import { Link } from "react-router";
 import type { Route } from "./+types/instructor.analytics";
 import { requireInstructorOrAdmin } from "~/lib/access.server";
 import { getAnalyticsOverview } from "~/services/analyticsService";
 import { Button } from "~/components/ui/button";
-import {
-  Card,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "~/components/ui/card";
-import { Skeleton } from "~/components/ui/skeleton";
+import { Card } from "~/components/ui/card";
 import {
   Table,
   TableBody,
@@ -18,11 +12,18 @@ import {
   TableHeader,
   TableRow,
 } from "~/components/ui/table";
-import { AlertTriangle, BarChart3, Plus } from "lucide-react";
+import {
+  AnalyticsErrorBoundary,
+  AnalyticsSkeleton,
+  StatCardGrid,
+  volumeCards,
+} from "~/components/analytics/analytics-page";
+import { BarChart3, Plus } from "lucide-react";
 import { formatPercent, formatRevenue } from "~/lib/utils";
 
 // ─── Analytics Overview ───
-// Students and gross revenue across the courses in scope: an instructor's own
+// Students, gross revenue, completion, progress and quiz scores across the
+// courses in scope: an instructor's own
 // published and archived courses, or every course for admins. All aggregation
 // lives in analyticsService.getAnalyticsOverview.
 
@@ -46,19 +47,6 @@ export default function InstructorAnalytics({
 }: Route.ComponentProps) {
   const { rows, totals, isAdmin } = loaderData;
 
-  const cards = [
-    { label: "Students", value: totals.students.toLocaleString() },
-    {
-      label: "Students (last 30 days)",
-      value: totals.studentsLast30Days.toLocaleString(),
-    },
-    { label: "Gross revenue", value: formatRevenue(totals.revenue) },
-    {
-      label: "Gross revenue (last 30 days)",
-      value: formatRevenue(totals.revenueLast30Days),
-    },
-  ];
-
   return (
     <div className="mx-auto max-w-6xl p-6 lg:p-8">
       <nav className="mb-6 text-sm text-muted-foreground">
@@ -73,8 +61,8 @@ export default function InstructorAnalytics({
         <h1 className="text-3xl font-bold">Analytics</h1>
         <p className="mt-1 text-muted-foreground">
           {isAdmin
-            ? "Students and gross revenue across every course"
-            : "Students and gross revenue across your courses"}
+            ? "Students, gross revenue, completion, progress and quiz scores across every course"
+            : "Students, gross revenue, completion, progress and quiz scores across your courses"}
         </p>
       </div>
 
@@ -94,18 +82,7 @@ export default function InstructorAnalytics({
         </div>
       ) : (
         <>
-          <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {cards.map((card) => (
-              <Card key={card.label}>
-                <CardHeader>
-                  <CardDescription>{card.label}</CardDescription>
-                  <CardTitle className="text-2xl tabular-nums">
-                    {card.value}
-                  </CardTitle>
-                </CardHeader>
-              </Card>
-            ))}
-          </div>
+          <StatCardGrid cards={volumeCards(totals)} />
 
           <Card className="py-0">
             <Table>
@@ -117,7 +94,7 @@ export default function InstructorAnalytics({
                   <TableHead className="text-right">Last 30 days</TableHead>
                   <TableHead className="text-right">Gross revenue</TableHead>
                   <TableHead className="text-right">
-                    Revenue, last 30 days
+                    Gross revenue, last 30 days
                   </TableHead>
                   <TableHead className="text-right">Completion</TableHead>
                   <TableHead className="text-right">Avg. progress</TableHead>
@@ -171,53 +148,14 @@ export default function InstructorAnalytics({
 }
 
 export function HydrateFallback() {
-  return (
-    <div className="mx-auto max-w-6xl p-6 lg:p-8">
-      <Skeleton className="mb-6 h-4 w-40" />
-      <Skeleton className="mb-8 h-9 w-72" />
-      <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <Skeleton key={i} className="h-24 w-full" />
-        ))}
-      </div>
-      <Skeleton className="h-64 w-full" />
-    </div>
-  );
+  return <AnalyticsSkeleton cardCount={4} withTable />;
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
-  let title = "Something went wrong";
-  let message = "An unexpected error occurred while loading analytics.";
-
-  if (isRouteErrorResponse(error)) {
-    if (error.status === 401) {
-      title = "Sign in required";
-      message =
-        typeof error.data === "string"
-          ? error.data
-          : "Please select a user from the DevUI panel.";
-    } else if (error.status === 403) {
-      title = "Not allowed";
-      message =
-        typeof error.data === "string"
-          ? error.data
-          : "You don't have access to this page.";
-    } else {
-      title = `Error ${error.status}`;
-      message = typeof error.data === "string" ? error.data : error.statusText;
-    }
-  }
-
   return (
-    <div className="flex min-h-[50vh] items-center justify-center p-6">
-      <div className="text-center">
-        <AlertTriangle className="mx-auto mb-4 size-12 text-muted-foreground" />
-        <h1 className="mb-2 text-2xl font-bold">{title}</h1>
-        <p className="mb-6 text-muted-foreground">{message}</p>
-        <Link to="/instructor">
-          <Button>My Courses</Button>
-        </Link>
-      </div>
-    </div>
+    <AnalyticsErrorBoundary
+      error={error}
+      fallbackMessage="An unexpected error occurred while loading analytics."
+    />
   );
 }
