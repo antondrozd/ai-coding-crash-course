@@ -54,6 +54,8 @@ export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
       value: formatRevenue(course.revenueLast30Days),
     },
     { label: "Purchases", value: course.purchases.toLocaleString() },
+    { label: "Completion rate", value: formatPercent(course.completionRate) },
+    { label: "Average progress", value: formatPercent(course.averageProgress) },
     {
       label: "Avg. best quiz score",
       value: formatPercent(course.averageBestQuizScore),
@@ -95,7 +97,7 @@ export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
         </div>
       </div>
 
-      <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {cards.map((card) => (
           <Card key={card.label}>
             <CardHeader>
@@ -116,8 +118,8 @@ export function HydrateFallback() {
     <div className="mx-auto max-w-6xl p-6 lg:p-8">
       <Skeleton className="mb-6 h-4 w-56" />
       <Skeleton className="mb-8 h-9 w-72" />
-      <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        {Array.from({ length: 5 }).map((_, i) => (
+      <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {Array.from({ length: 8 }).map((_, i) => (
           <Skeleton key={i} className="h-24 w-full" />
         ))}
       </div>
