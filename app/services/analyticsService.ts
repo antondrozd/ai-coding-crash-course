@@ -3,6 +3,7 @@ import {
   count,
   countDistinct,
   eq,
+  exists,
   avg,
   inArray,
   max,
@@ -64,6 +65,25 @@ export interface AnalyticsOverview {
 export interface CourseAnalytics extends AnalyticsCourseRow {
   /** Number of purchase rows (a team purchase counts as one). */
   purchases: number;
+  /** One entry per quiz, in course order (module position, then lesson position). */
+  quizzes: QuizBreakdown[];
+}
+
+export interface QuizBreakdown {
+  quizId: number;
+  quizTitle: string;
+  lessonTitle: string;
+  /** Distinct enrolled students with at least one attempt. */
+  attempted: number;
+  /** Distinct enrolled students in the course. */
+  enrolled: number;
+  /** Mean of each attempting student's best score, 0–1; `null` when nobody attempted. */
+  averageBestScore: number | null;
+  /**
+   * Share of attempting students whose best score is `>=` the quiz's own
+   * passing score (the stored `passed` flag is ignored); `null` when nobody attempted.
+   */
+  passRate: number | null;
 }
 
 export function getAnalyticsOverview({
@@ -77,9 +97,7 @@ export function getAnalyticsOverview({
   const scoped = selectCourses(
     and(
       ne(courses.status, CourseStatus.Draft),
-      instructorId === null
-        ? undefined
-        : eq(courses.instructorId, instructorId)
+      instructorId === null ? undefined : eq(courses.instructorId, instructorId)
     )
   );
 
@@ -113,7 +131,11 @@ export function getCourseAnalytics(
   if (scoped.length === 0) return null;
 
   const [row] = buildRows(scoped, now);
-  return { ...row, purchases: purchaseCounts([courseId]).get(courseId) ?? 0 };
+  return {
+    ...row,
+    purchases: purchaseCounts([courseId]).get(courseId) ?? 0,
+    quizzes: quizBreakdown(courseId, row.students),
+  };
 }
 
 // ─── Internals ───
@@ -211,9 +233,21 @@ function purchaseCounts(courseIds: number[]) {
 /**
  * Subquery with one row per (student, quiz) holding the student's best score
  * on that quiz, for quizzes in the given courses. Retakes collapse to the best
- * attempt. Shared by the course-level average and the per-quiz breakdown.
+ * attempt. Only students enrolled in the quiz's course count, so "attempted by
+ * X of N enrolled" stays coherent. Shared by the course-level average and the
+ * per-quiz breakdown.
  */
 function bestQuizScores(courseIds: number[]) {
+  const enrolledInCourse = db
+    .select({ one: sql`1` })
+    .from(enrollments)
+    .where(
+      and(
+        eq(enrollments.userId, quizAttempts.userId),
+        eq(enrollments.courseId, modules.courseId)
+      )
+    );
+
   return db
     .select({
       courseId: modules.courseId,
@@ -225,7 +259,7 @@ function bestQuizScores(courseIds: number[]) {
     .innerJoin(quizzes, eq(quizzes.id, quizAttempts.quizId))
     .innerJoin(lessons, eq(lessons.id, quizzes.lessonId))
     .innerJoin(modules, eq(modules.id, lessons.moduleId))
-    .where(inArray(modules.courseId, courseIds))
+    .where(and(inArray(modules.courseId, courseIds), exists(enrolledInCourse)))
     .groupBy(modules.courseId, quizAttempts.quizId, quizAttempts.userId)
     .as("best_quiz_scores");
 }
@@ -243,4 +277,50 @@ function quizScoreStats(courseIds: number[]) {
       .all()
       .map((r) => [r.courseId, r.averageBestQuizScore])
   );
+}
+
+/**
+ * Per-quiz figures for one course, in course order. Quizzes nobody attempted
+ * still appear, with 0 attempted and null score / pass rate.
+ */
+function quizBreakdown(courseId: number, enrolled: number): QuizBreakdown[] {
+  const best = bestQuizScores([courseId]);
+  const stats = db
+    .select({
+      quizId: best.quizId,
+      attempted: count().as("attempted"),
+      averageBestScore: avg(best.bestScore).as("average_best_score"),
+      passRate: avg(
+        sql`case when ${best.bestScore} >= ${quizzes.passingScore} then 1.0 else 0 end`
+      ).as("pass_rate"),
+    })
+    .from(best)
+    .innerJoin(quizzes, eq(quizzes.id, best.quizId))
+    .groupBy(best.quizId)
+    .as("quiz_stats");
+
+  return db
+    .select({
+      quizId: quizzes.id,
+      quizTitle: quizzes.title,
+      lessonTitle: lessons.title,
+      attempted: stats.attempted,
+      averageBestScore: stats.averageBestScore,
+      passRate: stats.passRate,
+    })
+    .from(quizzes)
+    .innerJoin(lessons, eq(lessons.id, quizzes.lessonId))
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .leftJoin(stats, eq(stats.quizId, quizzes.id))
+    .where(eq(modules.courseId, courseId))
+    .orderBy(modules.position, lessons.position, quizzes.id)
+    .all()
+    .map((q) => ({
+      ...q,
+      attempted: q.attempted ?? 0,
+      enrolled,
+      averageBestScore:
+        q.averageBestScore === null ? null : Number(q.averageBestScore),
+      passRate: q.passRate === null ? null : Number(q.passRate),
+    }));
 }

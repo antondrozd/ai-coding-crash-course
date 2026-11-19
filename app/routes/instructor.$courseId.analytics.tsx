@@ -10,11 +10,19 @@ import {
   CardTitle,
 } from "~/components/ui/card";
 import { Skeleton } from "~/components/ui/skeleton";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "~/components/ui/table";
 import { AlertTriangle, Pencil, Users } from "lucide-react";
 import { formatPercent, formatRevenue } from "~/lib/utils";
 
 // ─── Course Analytics ───
-// Students, gross revenue and purchases for one course. Open to the course's
+// Students, gross revenue, purchases and a per-quiz breakdown for one course. Open to the course's
 // own instructor and admins; drafts render too. All aggregation lives in
 // analyticsService.getCourseAnalytics.
 
@@ -107,6 +115,45 @@ export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
           </Card>
         ))}
       </div>
+
+      <h2 className="mb-4 text-xl font-semibold">Quizzes</h2>
+      {course.quizzes.length === 0 ? (
+        <p className="text-muted-foreground">This course has no quizzes.</p>
+      ) : (
+        <Card className="py-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="pl-4">Lesson</TableHead>
+                <TableHead>Quiz</TableHead>
+                <TableHead className="text-right">Attempted</TableHead>
+                <TableHead className="text-right">Avg. best score</TableHead>
+                <TableHead className="pr-4 text-right">Pass rate</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {course.quizzes.map((quiz) => (
+                <TableRow key={quiz.quizId}>
+                  <TableCell className="pl-4">{quiz.lessonTitle}</TableCell>
+                  <TableCell className="font-medium">
+                    {quiz.quizTitle}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {quiz.attempted.toLocaleString()} of{" "}
+                    {quiz.enrolled.toLocaleString()}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatPercent(quiz.averageBestScore)}
+                  </TableCell>
+                  <TableCell className="pr-4 text-right tabular-nums">
+                    {formatPercent(quiz.passRate)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
     </div>
   );
 }

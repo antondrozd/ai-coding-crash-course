@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
+import { eq } from "drizzle-orm";
 
 let testDb: ReturnType<typeof createTestDb>;
 let base: ReturnType<typeof seedBaseData>;
@@ -350,10 +351,15 @@ function createQuiz(courseId: number, passingScore = 0.7) {
     .get();
 }
 
-function attempt(userId: number, quizId: number, score: number) {
+function attempt(
+  userId: number,
+  quizId: number,
+  score: number,
+  passed = score > 0.7
+) {
   testDb
     .insert(schema.quizAttempts)
-    .values({ userId, quizId, score, passed: score >= 0.7, attemptedAt: ago(DAY) })
+    .values({ userId, quizId, score, passed, attemptedAt: ago(DAY) })
     .run();
 }
 
@@ -411,5 +417,134 @@ describe("average best quiz score", () => {
     expect(
       getCourseAnalytics(base.course.id, { now: NOW })?.averageBestQuizScore
     ).toBeNull();
+  });
+});
+
+// ─── Quiz breakdown ───
+
+describe("quiz breakdown", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  function breakdown() {
+    return getCourseAnalytics(base.course.id, { now: NOW })?.quizzes;
+  }
+
+  /** Moves a quiz's module to `position` and renames its lesson. */
+  function place(
+    quiz: { lessonId: number },
+    position: number,
+    lessonTitle: string
+  ) {
+    const lesson = testDb
+      .update(schema.lessons)
+      .set({ title: lessonTitle })
+      .where(eq(schema.lessons.id, quiz.lessonId))
+      .returning()
+      .get();
+    testDb
+      .update(schema.modules)
+      .set({ position })
+      .where(eq(schema.modules.id, lesson.moduleId))
+      .run();
+  }
+
+  it("lists the course's quizzes in course order with 0 attempted and null figures when nobody attempted", () => {
+    const second = createQuiz(base.course.id);
+    const first = createQuiz(base.course.id);
+    place(second, 2, "Advanced");
+    place(first, 1, "Intro");
+    createQuiz(createCourse(base.instructor.id, "Elsewhere").id);
+    enroll(base.user.id, base.course.id);
+    enroll(createStudent().id, base.course.id);
+
+    expect(breakdown()).toEqual([
+      {
+        quizId: first.id,
+        quizTitle: first.title,
+        lessonTitle: "Intro",
+        attempted: 0,
+        enrolled: 2,
+        averageBestScore: null,
+        passRate: null,
+      },
+      {
+        quizId: second.id,
+        quizTitle: second.title,
+        lessonTitle: "Advanced",
+        attempted: 0,
+        enrolled: 2,
+        averageBestScore: null,
+        passRate: null,
+      },
+    ]);
+  });
+
+  it("judges a pass against the quiz's own passing score, with a score exactly at the threshold passing", () => {
+    const quiz = createQuiz(base.course.id, 0.5);
+    const atThreshold = createStudent();
+    const below = createStudent();
+    const above = createStudent();
+    const notAttempted = createStudent();
+    for (const s of [atThreshold, below, above, notAttempted]) {
+      enroll(s.id, base.course.id);
+    }
+    attempt(atThreshold.id, quiz.id, 0.5);
+    attempt(below.id, quiz.id, 0.4);
+    attempt(above.id, quiz.id, 0.6);
+
+    const [row] = breakdown()!;
+    expect(row).toMatchObject({ attempted: 3, enrolled: 4 });
+    expect(row.averageBestScore).toBeCloseTo(0.5);
+    expect(row.passRate).toBeCloseTo(2 / 3);
+  });
+
+  it("ignores a stored passed flag that disagrees with the quiz's threshold", () => {
+    const quiz = createQuiz(base.course.id, 0.8);
+    const flaggedPassed = createStudent();
+    const flaggedFailed = createStudent();
+    enroll(flaggedPassed.id, base.course.id);
+    enroll(flaggedFailed.id, base.course.id);
+    // Stored flags are inverted relative to the 0.8 threshold.
+    attempt(flaggedPassed.id, quiz.id, 0.75, true);
+    attempt(flaggedFailed.id, quiz.id, 0.85, false);
+
+    expect(breakdown()![0].passRate).toBeCloseTo(0.5);
+  });
+
+  it("counts only each student's best attempt, so retakes neither add attempters nor lower the figures", () => {
+    const quiz = createQuiz(base.course.id, 0.7);
+    const retaker = createStudent();
+    const oneShot = createStudent();
+    enroll(retaker.id, base.course.id);
+    enroll(oneShot.id, base.course.id);
+    attempt(retaker.id, quiz.id, 0.3);
+    attempt(retaker.id, quiz.id, 0.9);
+    attempt(retaker.id, quiz.id, 0.5);
+    attempt(oneShot.id, quiz.id, 0.6);
+
+    const [row] = breakdown()!;
+    expect(row).toMatchObject({ attempted: 2, enrolled: 2 });
+    expect(row.averageBestScore).toBeCloseTo(0.75);
+    expect(row.passRate).toBeCloseTo(0.5);
+  });
+
+  it("ignores attempts by students not enrolled in the course, in the breakdown and the course average", () => {
+    const quiz = createQuiz(base.course.id, 0.7);
+    const enrolled = createStudent();
+    const outsider = createStudent();
+    enroll(enrolled.id, base.course.id);
+    attempt(enrolled.id, quiz.id, 0.6);
+    attempt(outsider.id, quiz.id, 1);
+
+    const course = getCourseAnalytics(base.course.id, { now: NOW })!;
+    expect(course.quizzes[0]).toMatchObject({ attempted: 1, enrolled: 1 });
+    expect(course.quizzes[0].averageBestScore).toBeCloseTo(0.6);
+    expect(course.quizzes[0].passRate).toBe(0);
+    expect(course.averageBestQuizScore).toBeCloseTo(0.6);
+    const [row] = getAnalyticsOverview({ instructorId: null, now: NOW }).rows;
+    expect(row.averageBestQuizScore).toBeCloseTo(0.6);
   });
 });
