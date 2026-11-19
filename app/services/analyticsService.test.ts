@@ -11,7 +11,7 @@ vi.mock("~/db", () => ({
   },
 }));
 
-import { getAnalyticsOverview } from "./analyticsService";
+import { getAnalyticsOverview, getCourseAnalytics } from "./analyticsService";
 import { createTeamPurchase } from "./purchaseService";
 
 const NOW = new Date("2026-06-15T12:00:00.000Z");
@@ -243,5 +243,87 @@ describe("getAnalyticsOverview", () => {
         revenueLast30Days: 0,
       },
     });
+  });
+});
+
+describe("getCourseAnalytics", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  it("returns the course's identity and counts a duplicate enrollment once", () => {
+    const other = createStudent();
+    enroll(base.user.id, base.course.id);
+    enroll(base.user.id, base.course.id);
+    enroll(other.id, base.course.id);
+
+    expect(getCourseAnalytics(base.course.id, { now: NOW })).toMatchObject({
+      courseId: base.course.id,
+      title: base.course.title,
+      instructorName: "Test Instructor",
+      students: 2,
+    });
+  });
+
+  it("counts purchases and sums revenue at the amount paid, so a team purchase is one purchase", () => {
+    const teamBuyer = createStudent();
+    const soloBuyer = createStudent();
+    const elsewhere = createCourse(base.instructor.id, "Elsewhere");
+    // Team purchase: 5 seats bought in one payment of $200.00.
+    createTeamPurchase(teamBuyer.id, base.course.id, 20000, "US", 5);
+    purchase(soloBuyer.id, base.course.id, 4900);
+    purchase(soloBuyer.id, elsewhere.id, 9900);
+
+    expect(getCourseAnalytics(base.course.id, { now: NOW })).toMatchObject({
+      revenue: 24900,
+      purchases: 2,
+    });
+  });
+
+  it("counts zero purchases and zero revenue for a course nobody bought", () => {
+    expect(getCourseAnalytics(base.course.id, { now: NOW })).toMatchObject({
+      students: 0,
+      revenue: 0,
+      purchases: 0,
+    });
+  });
+
+  it("counts enrollments and purchases in the rolling 30-day window relative to the injected now", () => {
+    const inside = createStudent();
+    const outside = createStudent();
+    enroll(inside.id, base.course.id, ago(30 * DAY - 60_000));
+    enroll(outside.id, base.course.id, ago(30 * DAY + 60_000));
+    purchase(inside.id, base.course.id, 4900, ago(30 * DAY - 60_000));
+    purchase(outside.id, base.course.id, 3100, ago(30 * DAY + 60_000));
+
+    expect(getCourseAnalytics(base.course.id, { now: NOW })).toMatchObject({
+      students: 2,
+      studentsLast30Days: 1,
+      revenue: 8000,
+      revenueLast30Days: 4900,
+      purchases: 2,
+    });
+  });
+
+  it("still reports a draft course's figures", () => {
+    const draft = createCourse(
+      base.instructor.id,
+      "Draft Course",
+      schema.CourseStatus.Draft
+    );
+    enroll(base.user.id, draft.id);
+    purchase(base.user.id, draft.id, 1500);
+
+    expect(getCourseAnalytics(draft.id, { now: NOW })).toMatchObject({
+      courseId: draft.id,
+      students: 1,
+      revenue: 1500,
+      purchases: 1,
+    });
+  });
+
+  it("returns null for a course that does not exist", () => {
+    expect(getCourseAnalytics(9999, { now: NOW })).toBeNull();
   });
 });

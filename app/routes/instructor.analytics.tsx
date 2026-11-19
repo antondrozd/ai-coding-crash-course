@@ -19,17 +19,12 @@ import {
   TableRow,
 } from "~/components/ui/table";
 import { AlertTriangle, BarChart3, Plus } from "lucide-react";
-import { formatPrice } from "~/lib/utils";
+import { formatRevenue } from "~/lib/utils";
 
 // ─── Analytics Overview ───
 // Students and gross revenue across the courses in scope: an instructor's own
 // published and archived courses, or every course for admins. All aggregation
 // lives in analyticsService.getAnalyticsOverview.
-
-// formatPrice renders 0 as "Free", which reads wrong for revenue.
-function formatRevenue(cents: number) {
-  return cents === 0 ? "$0.00" : formatPrice(cents);
-}
 
 export function meta() {
   return [{ title: "Analytics — Cadence" }];
