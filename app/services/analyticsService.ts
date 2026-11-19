@@ -3,7 +3,9 @@ import {
   count,
   countDistinct,
   eq,
+  avg,
   inArray,
+  max,
   ne,
   sql,
   sum,
@@ -14,7 +16,11 @@ import {
   CourseStatus,
   courses,
   enrollments,
+  lessons,
+  modules,
   purchases,
+  quizAttempts,
+  quizzes,
   users,
 } from "~/db/schema";
 
@@ -37,6 +43,8 @@ export interface AnalyticsCourseRow {
   revenue: number;
   /** Gross revenue in cents from purchases within the last 30 days. */
   revenueLast30Days: number;
+  /** Mean of every (student, quiz) best score in the course, 0–1; `null` when nobody attempted a quiz. */
+  averageBestQuizScore: number | null;
 }
 
 export interface AnalyticsTotals {
@@ -133,6 +141,7 @@ function buildRows(scoped: ScopedCourse[], now: Date): AnalyticsCourseRow[] {
   const cutoff = recentCutoff(now);
   const students = studentStats(courseIds, cutoff);
   const revenue = revenueStats(courseIds, cutoff);
+  const quizScores = quizScoreStats(courseIds);
 
   return scoped.map((c) => ({
     courseId: c.id,
@@ -142,6 +151,7 @@ function buildRows(scoped: ScopedCourse[], now: Date): AnalyticsCourseRow[] {
     studentsLast30Days: students.get(c.id)?.studentsLast30Days ?? 0,
     revenue: revenue.get(c.id)?.revenue ?? 0,
     revenueLast30Days: revenue.get(c.id)?.revenueLast30Days ?? 0,
+    averageBestQuizScore: quizScores.get(c.id) ?? null,
   }));
 }
 
@@ -195,5 +205,42 @@ function purchaseCounts(courseIds: number[]) {
       .groupBy(purchases.courseId)
       .all()
       .map((r) => [r.courseId, r.purchases])
+  );
+}
+
+/**
+ * Subquery with one row per (student, quiz) holding the student's best score
+ * on that quiz, for quizzes in the given courses. Retakes collapse to the best
+ * attempt. Shared by the course-level average and the per-quiz breakdown.
+ */
+function bestQuizScores(courseIds: number[]) {
+  return db
+    .select({
+      courseId: modules.courseId,
+      quizId: quizAttempts.quizId,
+      userId: quizAttempts.userId,
+      bestScore: max(quizAttempts.score).as("best_score"),
+    })
+    .from(quizAttempts)
+    .innerJoin(quizzes, eq(quizzes.id, quizAttempts.quizId))
+    .innerJoin(lessons, eq(lessons.id, quizzes.lessonId))
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .where(inArray(modules.courseId, courseIds))
+    .groupBy(modules.courseId, quizAttempts.quizId, quizAttempts.userId)
+    .as("best_quiz_scores");
+}
+
+function quizScoreStats(courseIds: number[]) {
+  const best = bestQuizScores(courseIds);
+  return new Map(
+    db
+      .select({
+        courseId: best.courseId,
+        averageBestQuizScore: avg(best.bestScore).mapWith(Number),
+      })
+      .from(best)
+      .groupBy(best.courseId)
+      .all()
+      .map((r) => [r.courseId, r.averageBestQuizScore])
   );
 }

@@ -79,3 +79,7 @@ export function formatDuration(
   }
   return `${mStr}m`;
 }
+
+export function formatPercent(rate: number | null): string {
+  return rate === null ? "—" : `${Math.round(rate * 100)}%`;
+}

@@ -19,7 +19,7 @@ import {
   TableRow,
 } from "~/components/ui/table";
 import { AlertTriangle, BarChart3, Plus } from "lucide-react";
-import { formatRevenue } from "~/lib/utils";
+import { formatPercent, formatRevenue } from "~/lib/utils";
 
 // ─── Analytics Overview ───
 // Students and gross revenue across the courses in scope: an instructor's own
@@ -116,8 +116,11 @@ export default function InstructorAnalytics({
                   <TableHead className="text-right">Students</TableHead>
                   <TableHead className="text-right">Last 30 days</TableHead>
                   <TableHead className="text-right">Gross revenue</TableHead>
-                  <TableHead className="pr-4 text-right">
+                  <TableHead className="text-right">
                     Revenue, last 30 days
+                  </TableHead>
+                  <TableHead className="pr-4 text-right">
+                    Avg. best quiz score
                   </TableHead>
                 </TableRow>
               </TableHeader>
@@ -142,8 +145,11 @@ export default function InstructorAnalytics({
                     <TableCell className="text-right tabular-nums">
                       {formatRevenue(row.revenue)}
                     </TableCell>
-                    <TableCell className="pr-4 text-right tabular-nums">
+                    <TableCell className="text-right tabular-nums">
                       {formatRevenue(row.revenueLast30Days)}
+                    </TableCell>
+                    <TableCell className="pr-4 text-right tabular-nums">
+                      {formatPercent(row.averageBestQuizScore)}
                     </TableCell>
                   </TableRow>
                 ))}

@@ -327,3 +327,89 @@ describe("getCourseAnalytics", () => {
     expect(getCourseAnalytics(9999, { now: NOW })).toBeNull();
   });
 });
+
+// ─── Average best quiz score ───
+
+let quizCounter = 0;
+function createQuiz(courseId: number, passingScore = 0.7) {
+  const n = ++quizCounter;
+  const mod = testDb
+    .insert(schema.modules)
+    .values({ courseId, title: `Module ${n}`, position: n })
+    .returning()
+    .get();
+  const lesson = testDb
+    .insert(schema.lessons)
+    .values({ moduleId: mod.id, title: `Lesson ${n}`, position: 1 })
+    .returning()
+    .get();
+  return testDb
+    .insert(schema.quizzes)
+    .values({ lessonId: lesson.id, title: `Quiz ${n}`, passingScore })
+    .returning()
+    .get();
+}
+
+function attempt(userId: number, quizId: number, score: number) {
+  testDb
+    .insert(schema.quizAttempts)
+    .values({ userId, quizId, score, passed: score >= 0.7, attemptedAt: ago(DAY) })
+    .run();
+}
+
+describe("average best quiz score", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  it("counts only a student's best attempt on a quiz, so retakes don't lower the average", () => {
+    const quiz = createQuiz(base.course.id);
+    enroll(base.user.id, base.course.id);
+    attempt(base.user.id, quiz.id, 0.4);
+    attempt(base.user.id, quiz.id, 0.9);
+    attempt(base.user.id, quiz.id, 0.6);
+
+    const [row] = getAnalyticsOverview({ instructorId: null, now: NOW }).rows;
+    expect(row.averageBestQuizScore).toBeCloseTo(0.9);
+    expect(
+      getCourseAnalytics(base.course.id, { now: NOW })?.averageBestQuizScore
+    ).toBeCloseTo(0.9);
+  });
+
+  it("averages every (student, quiz) best score in the course, ignoring other courses' quizzes", () => {
+    const other = createStudent();
+    const elsewhere = createCourse(base.instructor.id, "Elsewhere");
+    const quizA = createQuiz(base.course.id);
+    const quizB = createQuiz(base.course.id);
+    const foreignQuiz = createQuiz(elsewhere.id);
+    enroll(base.user.id, base.course.id);
+    enroll(other.id, base.course.id);
+    enroll(other.id, elsewhere.id);
+    attempt(base.user.id, quizA.id, 0.5);
+    attempt(base.user.id, quizA.id, 0.8);
+    attempt(other.id, quizA.id, 0.6);
+    attempt(base.user.id, quizB.id, 1);
+    attempt(other.id, foreignQuiz.id, 0.2);
+
+    // Best scores: user/A 0.8, other/A 0.6, user/B 1.0 -> mean 0.8.
+    const rows = getAnalyticsOverview({ instructorId: null, now: NOW }).rows;
+    const byId = new Map(rows.map((r) => [r.courseId, r]));
+    expect(byId.get(base.course.id)?.averageBestQuizScore).toBeCloseTo(0.8);
+    expect(byId.get(elsewhere.id)?.averageBestQuizScore).toBeCloseTo(0.2);
+    expect(
+      getCourseAnalytics(base.course.id, { now: NOW })?.averageBestQuizScore
+    ).toBeCloseTo(0.8);
+  });
+
+  it("is null when nobody has attempted any quiz in the course", () => {
+    createQuiz(base.course.id);
+    enroll(base.user.id, base.course.id);
+
+    const [row] = getAnalyticsOverview({ instructorId: null, now: NOW }).rows;
+    expect(row.averageBestQuizScore).toBeNull();
+    expect(
+      getCourseAnalytics(base.course.id, { now: NOW })?.averageBestQuizScore
+    ).toBeNull();
+  });
+});
