@@ -327,3 +327,144 @@ describe("getCourseAnalytics", () => {
     expect(getCourseAnalytics(9999, { now: NOW })).toBeNull();
   });
 });
+
+// ─── Completion rate and average progress (#5) ───
+
+let moduleCounter = 0;
+function createLessons(courseId: number, n: number) {
+  const mod = testDb
+    .insert(schema.modules)
+    .values({ courseId, title: `Module ${++moduleCounter}`, position: 1 })
+    .returning()
+    .get();
+  return Array.from({ length: n }, (_, i) =>
+    testDb
+      .insert(schema.lessons)
+      .values({ moduleId: mod.id, title: `Lesson ${i + 1}`, position: i + 1 })
+      .returning()
+      .get()
+  );
+}
+
+function setProgress(
+  userId: number,
+  lessonId: number,
+  status: schema.LessonProgressStatus = schema.LessonProgressStatus.Completed
+) {
+  testDb
+    .insert(schema.lessonProgress)
+    .values({
+      userId,
+      lessonId,
+      status,
+      completedAt:
+        status === schema.LessonProgressStatus.Completed ? ago(DAY) : null,
+    })
+    .run();
+}
+
+describe("completion rate and average progress", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  it("overview: only students who completed every lesson count as complete, and students with no progress lower the average", () => {
+    const lessons = createLessons(base.course.id, 4);
+    const finisher = createStudent();
+    const almost = createStudent();
+    const idle = createStudent();
+    for (const s of [finisher, almost, idle]) enroll(s.id, base.course.id);
+    enroll(finisher.id, base.course.id); // duplicate enrollment counts once
+    for (const l of lessons) setProgress(finisher.id, l.id);
+    // Missing the last lesson: in progress, not completed.
+    for (const l of lessons.slice(0, 3)) setProgress(almost.id, l.id);
+    setProgress(almost.id, lessons[3].id, schema.LessonProgressStatus.InProgress);
+    // Duplicate progress row for the same lesson counts once.
+    setProgress(almost.id, lessons[0].id);
+
+    const { rows } = getAnalyticsOverview({
+      instructorId: base.instructor.id,
+      now: NOW,
+    });
+
+    // 1 of 3 complete; progress (4/4 + 3/4 + 0/4) / 3 = 7/12.
+    expect(rows[0].completionRate).toBeCloseTo(1 / 3);
+    expect(rows[0].averageProgress).toBeCloseTo(7 / 12);
+  });
+
+  it("overview: ignores quiz attempts, other courses' lessons, and progress from students who aren't enrolled", () => {
+    const [lesson1, lesson2] = createLessons(base.course.id, 2);
+    const elsewhere = createCourse(base.instructor.id, "Elsewhere");
+    const [otherLesson] = createLessons(elsewhere.id, 1);
+    const enrolled = createStudent();
+    const stranger = createStudent();
+    enroll(enrolled.id, base.course.id);
+    setProgress(enrolled.id, lesson1.id);
+    setProgress(enrolled.id, otherLesson.id);
+    setProgress(stranger.id, lesson1.id);
+    setProgress(stranger.id, lesson2.id);
+    const quiz = testDb
+      .insert(schema.quizzes)
+      .values({ lessonId: lesson2.id, title: "Quiz", passingScore: 0.5 })
+      .returning()
+      .get();
+    testDb
+      .insert(schema.quizAttempts)
+      .values({ userId: enrolled.id, quizId: quiz.id, score: 1, passed: true })
+      .run();
+
+    const row = getAnalyticsOverview({
+      instructorId: base.instructor.id,
+      now: NOW,
+    }).rows.find((r) => r.courseId === base.course.id);
+
+    expect(row).toMatchObject({ completionRate: 0, averageProgress: 0.5 });
+  });
+
+  it("overview: a course with no lessons and a course with no enrollments have null rates", () => {
+    enroll(base.user.id, base.course.id); // enrolled, but no lessons
+    const empty = createCourse(base.instructor.id, "No Students");
+    createLessons(empty.id, 3);
+
+    const { rows } = getAnalyticsOverview({
+      instructorId: base.instructor.id,
+      now: NOW,
+    });
+
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row).toMatchObject({ completionRate: null, averageProgress: null });
+    }
+  });
+
+  it("per course: matches the overview's completion rate and average progress", () => {
+    const lessons = createLessons(base.course.id, 2);
+    const done = createStudent();
+    const half = createStudent();
+    const idle1 = createStudent();
+    const idle2 = createStudent();
+    for (const s of [done, half, idle1, idle2]) enroll(s.id, base.course.id);
+    for (const l of lessons) setProgress(done.id, l.id);
+    setProgress(half.id, lessons[0].id);
+
+    // 1 of 4 complete; progress (2 + 1 + 0 + 0) / (2 * 4) = 3/8.
+    expect(getCourseAnalytics(base.course.id, { now: NOW })).toMatchObject({
+      completionRate: 0.25,
+      averageProgress: 0.375,
+    });
+  });
+
+  it("per course: no lessons or no enrollments give null rates", () => {
+    enroll(base.user.id, base.course.id);
+    const empty = createCourse(base.instructor.id, "No Students");
+    createLessons(empty.id, 3);
+
+    for (const id of [base.course.id, empty.id]) {
+      expect(getCourseAnalytics(id, { now: NOW })).toMatchObject({
+        completionRate: null,
+        averageProgress: null,
+      });
+    }
+  });
+});

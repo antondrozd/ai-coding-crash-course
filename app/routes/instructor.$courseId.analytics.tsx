@@ -11,7 +11,7 @@ import {
 } from "~/components/ui/card";
 import { Skeleton } from "~/components/ui/skeleton";
 import { AlertTriangle, Pencil, Users } from "lucide-react";
-import { formatRevenue } from "~/lib/utils";
+import { formatPercent, formatRevenue } from "~/lib/utils";
 
 // ─── Course Analytics ───
 // Students, gross revenue and purchases for one course. Open to the course's
@@ -54,6 +54,8 @@ export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
       value: formatRevenue(course.revenueLast30Days),
     },
     { label: "Purchases", value: course.purchases.toLocaleString() },
+    { label: "Completion rate", value: formatPercent(course.completionRate) },
+    { label: "Average progress", value: formatPercent(course.averageProgress) },
   ];
 
   return (
